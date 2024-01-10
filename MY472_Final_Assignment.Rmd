@@ -1,0 +1,1266 @@
+---
+title: "MY472 Final Assignment"
+author: "202203879"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE} 
+# this chunk contains code that sets global options for the entire .Rmd. 
+# we use include=FALSE to suppress it from the top of the document, but it will still appear in the appendix. 
+
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, fig.width=9, fig.height=6)
+# actually set the global chunk options. 
+# we set echo=FALSE to suppress code such that it by default does not appear throughout the document.
+# Warning and message attributes added to avoid a few error/warning messages from appearing in the knitted HTML file.
+
+# note: this is different from .Rmd default
+```
+
+**Research Question:** In the United Kingdom, a police officer has powers to stop and search any individual if the officer has ‘reasonable grounds’ to suspect the individual is carrying certain items or, under some other conditions, if a senior police officer has granted approval (see here for details). Are there biases in who experiences stop and search by the police?
+
+The replicable R code for this analysis is hosted in a public Github repository: [MY472_Final_Assignment](https://github.com/vidhanshar/MY472_Final_Assignment)
+
+
+## Introduction
+This research aims to examine any unfair biases in the exercise of legislative powers granted by the 'Section 163 of the Road Traffic Act 1988' and 'Section 1 of PACE 1984' to the UK police, specifically focusing on potential biases against ethnic races, any communities, or individuals. Before delving into the analysis, it is essential to justify the need for investigating potential biases.
+
+### Why is there a need to research/investigate any suspected or potential biases in exercising Stop and Search powers by the UK police?
+Several reasons underscore the importance of investigating potential biases in 'Stop and Search' powers:
+
+1. **Legal Protections:** Officers must respect individuals' rights under the UK's Equality Act 2010, ensuring that stops are not based on race, age, sex, sexual orientation, gender reassignment, disability, religion, or faith.
+
+2. **Public Trust** Maintaining fair conduct and perception is crucial for police forces to garner public trust and cooperation in maintaining law and order.
+
+3. **Global Concerns:** International incidents of police brutality against minority groups, exemplified by movements like Black Lives Matter, emphasize the need for monitoring and addressing discriminatory use of policing powers
+
+4. The HMIC’s (His Majesty’s Inspectorate Constabulary) [Stop and Search Survey 2013](https://assets-hmicfrs.justiceinspectorates.gov.uk/uploads/stop-and-search-powers-20130709.pdf) also revealed shortcomings in justifying the fair use of powers, and uncovered disparities in stops, arrests, and outcomes based on ethnicity.
+
+## Research Approach 
+
+The approach in addressing the research question involved a thorough analysis of stop-search records along the dimensions of ethnicity, age, and gender. I chose to opt for SQL databases and queries to extract insights from the extensive dataset of 14,99,782 records, in the interest of minimizing the space and time complexity of the code. This approach facilitated segmentation and isolation of code scripts for each investigative objective, avoiding inherent dependencies in the entire code. 
+
+Further, I followed the below process for ensuring a systematic exploration of factors influencing potential biases.
+
+**Data Collection -> Data Cleaning/Munging -> Analysis -> Visualization**
+
+Let’s dive deeper and briefly understand the steps performed under each stage of the process:
+
+## Data Collection
+
+**Primary data source:** The primary data source for this study was official police records obtained from the [UK Police website](https://data.police.uk/data), comprising a CSV file with **14,99,782 records** of stop and search incidents from Nov’20 to Oct’23, and across 42 out of 45 territorial and 3 special police forces in the UK. The file contained 16 columns, encompassing key fields like driver's ethnicity, age group and gender, officer's ethnicity, object searched, search outcomes, and coordinates of the stop location, etc. As ancillary data we obtained the Census 2021 estimates of ethnic population ditstribution across all the local authorities in UK, from [Office for National Statistics's](https://www.ons.gov.uk/datasets/TS022/editions/2021/versions/1).
+
+```{r, results='hide'}
+
+# Install required packages and libraries 
+library(DBI)
+library(dplyr)
+library(readxl)
+library(stringr)
+library(gridExtra)
+library(ggplot2)
+library(sf)
+library(tmap)
+library(kableExtra)
+library(knitr)
+library(tidyverse)
+
+# Create and open connection to a SQL database that will include 
+# all the csv files with stop and search records as relational database 
+db <- dbConnect(RSQLite::SQLite(), "data/stopsearch_db.sqlite")
+
+```
+
+```{r, data_processing, cache=TRUE, echo=FALSE, results='hide'}
+
+
+dbExecute(db, "DROP TABLE IF EXISTS stopsearch")
+
+# Specify the substring to match with the required file names
+substring_to_match <- "^(20\\d{2})-\\d{2}-(.*)-stop-and-search"
+
+# List files with the specified substring
+fls <- list.files("data/stopandsearch", pattern = substring_to_match, full.names = TRUE, recursive = TRUE)
+
+# Add in all the files with names matching the substring.
+# Extract the name of the police force and the year from the file names
+# And add that as new columns to each of the files 
+# for later grouping data based on police force or year.
+for (f in fls) {
+  message(f) 
+
+  # Read file into memory
+  stopsearch_files <- read.csv(f, stringsAsFactors = FALSE)
+
+   # Extract file name using regex matching
+   matches <- str_match(basename(f), substring_to_match)
+
+  # Extract the police force from the file name
+    police_force <- matches[1, 3]
+    year <- matches[1, 2]
+
+  # Add a new column with the police force name to the dataframe
+  stopsearch_files$Police_Force <- police_force
+  stopsearch_files$Year <- year
+
+  # Write the modified dataframe back to the CSV file
+  write.csv(stopsearch_files, f, row.names = FALSE)
+
+  # Adding to table in SQL database
+  dbWriteTable(db, "stopsearch", stopsearch_files, append = TRUE)
+}
+
+```
+
+```{r, data_cleaning, echo=FALSE, cache=TRUE, results='hide'}
+
+# Create a test table with 5 rows from master table/dataframe 
+test_df <- dbGetQuery(db, "SELECT * FROM stopsearch LIMIT 5")
+
+#Changing the names of required columns
+dbExecute(db, "ALTER TABLE stopsearch
+RENAME COLUMN 'Self.defined.ethnicity' TO 'Person_defined_ethnicity'")
+
+dbExecute(db, "ALTER TABLE stopsearch
+RENAME COLUMN 'Age.range' TO 'Age_range'")
+
+dbExecute(db, "ALTER TABLE stopsearch
+RENAME COLUMN 'Officer.defined.ethnicity' TO 'Officer_ethnicity'")
+
+dbExecute(db, "ALTER TABLE stopsearch
+RENAME COLUMN 'Object.of.search' TO 'Object_of_search'")
+
+dbExecute(db, "ALTER TABLE stopsearch
+RENAME COLUMN 'Removal.of.more.than.just.outer.clothing' TO 'Removal_Outer_Clothing'")
+
+dbExecute(db, "ALTER TABLE stopsearch
+RENAME COLUMN 'Outcome.linked.to.object.of.search' TO 'Outcome_object_search'")
+
+```
+
+```{r, ethnic_population, cache=TRUE, echo=FALSE, results='hide'}
+
+# Read in the .xlsx file downloaded from NOS,UK website
+# Skip the first 3 unwanted row headers
+ethnic_census_df <- read_xlsx("data/ethnic_census21.xlsx", skip = 3)
+
+# Select the first 21 columns containing required data
+filter_ethnic_census_df <- ethnic_census_df[ ,c(1:21)]
+
+# Pivot long the census dataframe 
+pivot_ethnic_census <- filter_ethnic_census_df %>% rename("Area_code" = "Area code" , "Area_name" = "Area name") %>% pivot_longer(cols = -c("Area_code", "Area_name"), names_to = "Ethnicity", values_to = "Population")
+
+#filter_ethnic_census_df <- pivot_ethnic_census %>%
+  #filter(!("Area_name" %in% missing_forces_authorities$LAD18NM))
+
+# Cleaning the Ethnicity column to remove unwanted suffix
+pivot_ethnic_census$Ethnicity <- str_replace(pivot_ethnic_census$Ethnicity, "\\r\\n\\(number\\)", "")
+
+# Mapping the ethnicities to broad ethnic groups
+ethnic_census_df <- pivot_ethnic_census %>% 
+  mutate(Ethnic_Groups = case_when(
+    grepl("Asian, Asian British or Asian Welsh", Ethnicity) ~ "Asians",
+    grepl("Black, Black British, Black Welsh", Ethnicity) ~ "Blacks",
+    grepl("Mixed or Multiple ethnic groups", Ethnicity) ~ "Mixed Ethnic Groups",
+    grepl("White", Ethnicity) ~ "White",
+    grepl("Other ethnic group", Ethnicity) ~ "Other Ethnic Groups")) %>% filter(!is.null(Ethnic_Groups) & Ethnic_Groups != "NA")
+
+# Adding the ethnic census df to SQL database 
+dbWriteTable(db, "ethnic_pop", ethnic_census_df, overwrite = TRUE)
+
+# Create a table to find out the enthnic distribution 
+# of the UK population by broad ethnic groups
+ethnic_pop_density <- dbGetQuery(db, "
+  SELECT
+    Ethnic_Groups,
+    SUM(Population) AS Population,
+    100 * SUM(Population) / (SELECT SUM(Population) FROM ethnic_pop) AS Ethnic_Percentage
+  FROM ethnic_pop
+  GROUP BY Ethnic_Groups
+")
+
+# Create a table to find out the enthnic distribution 
+# of the UK population by detailed ethnicity
+detail_ethnic_pop <- dbGetQuery(db, "
+  SELECT
+    Ethnicity,
+    SUM(Population) AS Ethnic_Population,
+    100 * SUM(Population) / (SELECT SUM(Population) FROM ethnic_pop) AS Ethnic_Percentage
+  FROM ethnic_pop
+  GROUP BY Ethnicity
+")
+
+```
+
+## Data Processing/Cleaning
+
+To manage the extensive dataset obtained in a zip folder, the DBI library was employed to create a local SQL database. Using recursion and regex patterns, relevant stop-search records within each monthly sub-folder was accessed and written into a master relationa dataframe, named "stopsearch". 
+
+Additionally, ‘regex’ and ‘stringr’ operations were used to extract the corresponding police force and the year of the from the file names(csv files) and were added as anew column in each of the record files, before appending them into the SQL database.And the relevant columns were renamed to not include periods, to avoid problems with referencing them in SQL queries. 
+
+The final analysis involved SQL queries, stringr, and regex operations to segment the master dataframe into separate tables. This enabled extracting further insights by grouping and aggregating relevant columns, allowing for a comprehensive examination of specific instances and their percentage distributions.
+
+## Analysis & Visualization
+
+We start the analysis by observing whether being of a certain ethnicity makes an individual more likely to be stopped and searched. Then we subsequently delve further into the stop-search data and investigate potential biases along the various other aspects of the records, such as age, gender, outcomes of stoppings, object of search, etc.
+
+### Stop-Search Cases per 1000 of the ethnic population 
+
+Using SQL queries on the "stopsearch" database, the total count of stop and search incidences for each of the ethnic categories in years; 2021, 2022, and 2023, is derived. To address the issue of over/under representation due to varying ethnic population sizes, the counts were normalized along their respective population distribution. Therefore, the resulting graph illustrates the number of stop and search events per 1000 residents for each ethnic group in the UK.
+
+```{r, stopsearch_per_1000, echo=FALSE}
+
+# create a table commuting the counts and percentages of stop and search
+# by each ethnic group and across each year
+ethnic_stopsearch_df <- dbGetQuery(db, "SELECT Person_defined_ethnicity AS Ethnicity, Year AS Year, COUNT(*) AS Count,
+100.0 * COUNT(*) / SUM(COUNT(*)) OVER (PARTITION BY Year) AS Percentage
+FROM stopsearch
+WHERE
+Year in ('2021', '2022', '2023') AND
+Person_defined_ethnicity IS NOT NULL AND 
+Person_defined_ethnicity != ''
+GROUP BY Person_defined_ethnicity, Year")
+
+# Group the ethnicities into broader ethnic categories
+ethnic_stopsearch_df <- ethnic_stopsearch_df %>%
+  mutate(Ethnic_Groups = case_when(
+    grepl("Asian/Asian British", Ethnicity) ~ "Asians",
+    grepl("Black/African/Caribbean/Black British", Ethnicity) ~ "Blacks",
+    grepl("Mixed/Multiple ethnic groups", Ethnicity) ~ "Mixed Ethnic Groups",
+    grepl("White", Ethnicity) ~ "White",
+    grepl("Other ethnic group", Ethnicity) ~ "Other Ethnic Groups"))
+    
+# Group the ethnicity and counts and precentages accordingly 
+grped_ethnic_stopsearch <- ethnic_stopsearch_df %>%
+  group_by(Ethnic_Groups, Year) %>%
+  summarise(Count = sum(Count)) %>%
+  group_by(Year) %>%
+  mutate(Percentage = 100*(Count / sum(Count)))
+
+
+# Merge the ethnic population density with ethnic stopsearch df
+# Count the number of stop and search per 1000 of ethnic population for each ethnic group
+stopsearches_per1000_allyrs <- merge(ethnic_pop_density, grped_ethnic_stopsearch) %>% mutate(Stop_Searches_Per_1000 = as.integer(Count / Population * 1000)) %>% group_by(Ethnic_Groups) %>% select(Ethnic_Groups, Stop_Searches_Per_1000, Year) 
+
+# Plot the stopsearch per 1000 population by ethnic group, for each of the 3 years
+plot_stopsearches_per1000 <- ggplot(stopsearches_per1000_allyrs, aes(x = Ethnic_Groups, y = Stop_Searches_Per_1000, fill = Year)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "Stop-Search per 1000 by Ethnicity",
+    subtitle = "Number of stop and searches per 1,000 resident population of each ethnic group in the UK for the years 2021, 2022, and 2023.", 
+    caption = "Data Sources: National Office of Satistics, Census'21, data.police.uk/data\nNote: The stopsearch data for 2023 only includes records till Oct'23") +
+  theme(axis.text.x = element_text(), axis.title.x = element_blank(),
+        axis.title.y = element_blank(), plot.margin = margin(0, 0, 0, 0, "cm"),
+        plot.title = element_text(margin = margin(0, 0, 5, 0), face = "bold"),
+    plot.subtitle = element_text(margin = margin(5, 0, 8, 0)),
+    plot.caption = element_text(margin = margin(15, 0, 0, 0), color = "slategrey")) +
+  geom_text(
+    aes(label = sprintf("%.2f", Stop_Searches_Per_1000),
+        y = Stop_Searches_Per_1000 + 5),
+    color = "black",
+    size = 3,
+    position = position_dodge(width = 0.9)) +
+    scale_fill_brewer(palette = "Paired")
+
+# 
+ethnic_stopsearch_21 <- dbGetQuery(db, "SELECT Person_defined_ethnicity AS Ethnicity, Year AS Year, COUNT(*) AS Count,
+100.0 * COUNT(*) / SUM(COUNT(*)) OVER (PARTITION BY Year) AS Percentage
+FROM stopsearch
+WHERE
+Year in ('2021') AND
+Person_defined_ethnicity IS NOT NULL AND 
+Person_defined_ethnicity != ''
+GROUP BY Person_defined_ethnicity, Year")
+
+stopsearches_per1000_21 <- stopsearches_per1000_allyrs %>% filter(Year == '2021') %>% rename(Ethnicity = Ethnic_Groups) %>% select(-Year)
+
+#ethnic_stopsearch_21$Ethnicity[ethnic_stopsearch_21$Ethnicity == "Other ethnic group - Not stated"] <- "Other ethnic group - Any other ethnic group"
+
+# Delete the additional ethnic categorization in the population df 
+# because of no corresponding stop & search records to match & compare with
+detail_ethnic_pop <- detail_ethnic_pop %>% filter(!(Ethnicity == "White: Roma"))
+
+# extract the identifiers for detailed ethnic category
+# lower the extracted strings for better match
+ethnic_stopsearch_21$Match <- tolower(str_replace_all(str_extract(ethnic_stopsearch_21$Ethnicity, "(?<=\\-\\s)(.*)"), "/", ", "))
+detail_ethnic_pop$Match <- tolower(str_extract(detail_ethnic_pop$Ethnicity, "(?<=\\:\\s)(.*)"))
+
+# Manually change the Match values to be able to correctly merge
+ethnic_stopsearch_21$Match[ethnic_stopsearch_21$Match == "any other black, african, caribbean background"] <- "other black"
+ethnic_stopsearch_21$Match[ethnic_stopsearch_21$Match == "any other white background"] <- "other white"
+ethnic_stopsearch_21$Match[ethnic_stopsearch_21$Match == "any other mixed, multiple ethnic background"] <- "other mixed or multiple ethnic groups"
+ethnic_stopsearch_21$Match[ethnic_stopsearch_21$Match == "any other asian background"] <- "other asian"
+ethnic_stopsearch_21$Match[ethnic_stopsearch_21$Match == "english, welsh, scottish, northern irish, british"] <- "english, welsh, scottish, northern irish or british"
+ethnic_stopsearch_21$Match[ethnic_stopsearch_21$Match == "not stated"] <- "any other ethnic group"
+
+#Merge the population and stopsearch(2021) df
+detailed_ethnic_stopsearch_21 <- left_join(detail_ethnic_pop, ethnic_stopsearch_21, by ="Match") %>% mutate(Stop_Searches_Per_1000 = (Count / Ethnic_Population) * 1000) %>% group_by(Ethnicity.y) %>% select(Ethnicity.y, Stop_Searches_Per_1000) %>% rename(Ethnicity = Ethnicity.y)
+
+# Combine the detailed and broad ethnic group data for stopsearches per 1000 of population
+stopsearch_per1000_21_analysis <- rbind(detailed_ethnic_stopsearch_21, stopsearches_per1000_21)
+
+# Define a custom order for row indices
+custom_order <- c(20, 1, 2, 3, 4 , 5, 21, 6, 7, 8, 22, 9, 10, 11, 12, 23, 13, 14, 15, 24, 16, 17, 18, 19)
+
+# Reorder the dataframe based on the custom order
+stopsearch_per1000_21_analysis <- stopsearch_per1000_21_analysis[custom_order, ]
+
+# Remove/Replace the row names with NULL values
+rownames(stopsearch_per1000_21_analysis) <- NULL
+
+#Print the visualization
+plot_stopsearches_per1000
+
+# Print the data frame with formatting
+stopsearch_per1000_21_formatted <- stopsearch_per1000_21_analysis %>%
+  kable("html") %>%
+  row_spec(c(1, 7, 11, 16, 20), bold = TRUE, color = "black", background = "lightgrey")
+
+
+```
+<center> **Graph 1: Stop-search per 1000 by Ethnicity** </center>
+
+<br>
+**Analysis:** 
+1. The graph shows a relatively consistent but an overall declining number of stop-search events for each ethnic group over the three years. 
+2. Notably, White ethnic group exhibits the lowest count of stop-search events relative to their population across all three years, despite accounting for 50% or more of the absolute recorded stop-search events.
+3. The "Other Ethnic Group" consistently has the highest number of stop-search events per 1000 residents across the three years, followed by Blacks as the second-highest in this measure.
+
+To delve into detailed ethnic categories, census data was used to map to the 19 specific ethnic categories in stop-search records, calculating individual stop-search events per 1000 population for each ethnic identity, preserving insights into the nuances of ethnic groups.
+
+```{r}
+
+# Print the table for showing stop search counts for detailed ethnicities
+stopsearch_per1000_21_formatted
+
+```
+<center> **Table 1: Stop-Search per 1000 for detailed ethnic identities** </center>
+
+<br>
+4. The table highlights an interesting observation - under each of the broader ethnic groups the unspecified or the non-stated category witnesses the most no. of  stop and search cases, raising suspicion on whether this is the true representation of the reality or a lack of accuracy at the time of record taking.
+
+**Conclusion:** This hints at a possible bias against the Blacks and Other Ethnic groups, in terms of being more likely to be detained by the police for a stop and search than the other ethnic identities.
+
+**Limitations:**
+1)	The ethnic population data from UK’s Census’21 dataset has been used as the base population data for ethnic groups for years 2022 and 2023 as well, assuming that there must not be a significant relative change in the population distribution in two years, and for the lack of corresponding ethnic population data for 2022 and 2023.
+
+2)	The police data provided stop-search records from only 42 police forces, which doesn’t represent all the UK counties/local authorities, however the ethnic population data drawn from the Census’21 data is representative of the whole of UK.
+
+### Stop Search Outcomes by Ethnicity
+
+Next, we investigate the outcomes of the stop-search events by ethnicity across the entire period of the data (Nov’20 to Oct’23), to see if there was any considerable difference in the outcomes between different ethnic groups. Below is the graph illustrating percentage of stop-search outcomes by ethnicity:
+
+<br>
+```{r, outcomes, echo=FALSE}
+
+# Extract the table counting the stop and search outcomes for each ethnicity 
+outcome_by_ethnicity <- dbGetQuery(db, "
+SELECT
+  Person_defined_ethnicity AS Ethnicity,
+  Outcome AS Outcome,
+  COUNT(*) AS Count,
+  100.0 * COUNT(*) / SUM(COUNT(*)) OVER (PARTITION BY Person_defined_ethnicity) AS Percentage
+FROM
+  stopsearch
+WHERE
+  Person_defined_ethnicity IS NOT NULL AND Person_defined_ethnicity != '' AND 
+  Outcome IS NOT NULL AND Outcome !=''
+GROUP BY
+  Person_defined_ethnicity, Outcome")
+
+# Group the ethnicities into broader groups
+# Compute the counts & percentage of outcomes for each group 
+grouped_outcome_by_ethnicity <- outcome_by_ethnicity %>% 
+  mutate(Ethnic_Groups = case_when(
+    grepl("Asian/Asian British", Ethnicity) ~ "Asians",
+    grepl("Black/African/Caribbean/Black British", Ethnicity) ~ "Blacks",
+    grepl("Mixed/Multiple ethnic groups", Ethnicity) ~ "Mixed Ethnic Groups",
+    grepl("White", Ethnicity) ~ "White",
+    grepl("Other ethnic group", Ethnicity) ~ "Other Ethnic Groups")) %>%
+  mutate(Grp_Outcome = case_when(
+    grepl("A no further action disposal", Outcome) ~ "No further action",
+    grepl("Arrest", Outcome) ~ "Arrest",
+    !grepl("A no further action disposal|Arrest", Outcome) ~ "Minor action taken")) %>%
+  group_by(Ethnic_Groups, Grp_Outcome) %>%
+  summarise(Grp_Counts = sum(Count)) %>%
+  group_by(Ethnic_Groups) %>%
+  mutate(Grp_Percentage = 100*(Grp_Counts / sum(Grp_Counts)))
+
+# Plot the percentage of outcomes for each ethnic group
+ plot_outcome_by_ethnicity <- ggplot(grouped_outcome_by_ethnicity, aes(x = Ethnic_Groups, y = Grp_Percentage, fill = Grp_Outcome)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "Stop Search Outcomes by Ethnicity",
+    subtitle = "Percentage of stop and search outcomes by Ethnicity",
+    caption = "Data Source: data.police.uk/data\nNote: The data includes outcomes of stop and search records from Nov'20 to Oct'23", )  +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    plot.title = element_text(margin = margin(0, 0, 5, 0), face = "bold"),
+    plot.subtitle = element_text(margin = margin(5, 0, 8, 0)),
+    plot.caption = element_text(margin = margin(15, 0, 0, 0), color = "slategrey"),
+    legend.position = "bottom"
+  ) +
+   scale_fill_brewer(palette = "Dark2") +
+   geom_text(
+    aes(label = sprintf("%.2f", Grp_Percentage),
+        y = Grp_Percentage + 2.5),
+    color = "black",
+    size = 3,
+    position = position_dodge(width = 0.9))
+ 
+## Print the visualizations
+plot_outcome_by_ethnicity
+   
+
+```
+<center> **Graph 2: Stop-search outcomes by Ethnicity** </center>
+
+<br>
+**Analysis:** According to the data, the relative trend of outcomes within ethnic groups is fairly similar, but when compared across ethnic groups, Blacks have a marginally higher percentage of arrests than other, Asians have the highest percentage of minor actions being taken against them, and Other Ethnic groups are the ones with the highest percentage of cases when no further action is taken by the police. We can perhaps loosely suggest that people from Other Ethnic groups are stopped for no reason, since their percentage of being let go with no further action is marginally higher than the other ethnic groups.
+
+### Object Search Outcomes by Ethnicity
+
+Next, we investigate the percentage outcomes of object search for each ethnic group, i.e., the percentage times the object of search is found to be in possession of the person or not. The graph below illustrates the findings:
+
+
+<br>
+```{r, search_outcome, echo=FALSE}
+
+# Extract the table counting the percentage of object search outcomes for each ethnicity
+ethnicity_object_search <- dbGetQuery(db, "
+SELECT Person_defined_ethnicity AS Ethnicity, Outcome_object_search AS Outcome_of_search, COUNT(*) AS Count, 100.0 * COUNT(*) / SUM(COUNT(*)) OVER (PARTITION BY Person_defined_ethnicity) AS Proportion
+FROM stopsearch
+WHERE 
+Person_defined_ethnicity IS NOT NULL AND Person_defined_ethnicity != '' AND
+Outcome_object_search IS NOT NULL AND Outcome_object_search != ''
+GROUP BY Person_defined_ethnicity, Outcome_object_search")
+
+# Group the data by ethnic groups
+broad_ethnicity_object_search <- ethnicity_object_search %>%
+   mutate(Ethnicity = case_when(
+    grepl("Asian/Asian British", Ethnicity) ~ "Asians",
+    grepl("Black/African/Caribbean/Black British", Ethnicity) ~ "Blacks",
+    grepl("Mixed/Multiple ethnic groups", Ethnicity) ~ "Mixed Ethnic Groups",
+    grepl("White", Ethnicity) ~ "White",
+    grepl("Other ethnic group", Ethnicity) ~ "Other Ethnic Groups")) %>%
+  mutate(Outcome_of_search = case_when(
+   !grepl("True|False", Outcome_of_search) ~ "Not recorded",
+   grepl("True", Outcome_of_search) ~ "True",
+   grepl("False", Outcome_of_search) ~ "False"
+  )) %>%
+  group_by(Ethnicity, Outcome_of_search) %>%
+  summarise(Counts = sum(Count)) %>%
+  group_by(Ethnicity) %>%
+  mutate(Percentage = 100*(Counts/ sum(Counts))) #%>% filter(Outcome_of_search == 'False')
+
+# Create a bar plot to visualize the findings
+plot_object_search_ethnicity <- ggplot(broad_ethnicity_object_search, aes(x = Ethnicity, y = Percentage, fill = Outcome_of_search)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "Object search outcome by Ethnicity",
+    subtitle = "Percentage outcome of object search within each Ethnic group.", 
+    caption = "Data Sources: National Office of Satistics, Census'21, data.police.uk/data\nNote: The data includes stop and search records from Nov'20 to Oct'23") +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  theme(axis.text.x = element_text(), axis.title.x = element_blank(),
+        axis.title.y = element_blank(), plot.margin = margin(0, 0, 0, 0, "cm"),
+        plot.title = element_text(margin = margin(0, 0, 5, 0), face = "bold"),
+    plot.subtitle = element_text(margin = margin(5, 0, 8, 0)),
+    plot.caption = element_text(margin = margin(15, 0, 0, 0), color = "slategrey")) +
+  geom_text(
+    aes(label = sprintf("%.2f", Percentage),
+        y = Percentage + 5),
+    color = "black",
+    size = 3,
+    position = position_dodge(width = 0.9)) +
+    scale_fill_brewer(palette = "PuBu") + coord_flip()
+
+#Print the visualization
+plot_object_search_ethnicity
+
+```
+<center> **Graph 3: Object search outcomes by Ethnicity** </center>
+
+<br>
+**Analysis:** In the graph, it can be observed that only the percentage of outcomes for the Other Ethnic group stands out, with a significantly higher rate of having a false (not found) outcome for the object search (60%). This observation could indicate at a possible bias, as majority of the stop-search cases are not resulting in any eventual evidence or consequent actions, emphasizing the need for scrutiny and examination of the underlying reasons for such outcomes.
+
+
+### Ethnicity distribution of stop and search by Driver & Officer’s Ethnicity
+
+Next, we investigate the probability of a person from an ethnic group to be stopped and searched by an officer of another or the same ethnicity. The graph below illustrates the findings:
+
+<br>
+```{r, officer_ethnicity, cache=TRUE, echo=FALSE}
+
+# Create a table counting the no. of stop and searches by driver and officer ethnicity
+officer_enthnicity <- dbGetQuery(db, "
+SELECT Person_defined_ethnicity AS Ethnicity, Officer_ethnicity AS Officer_Ethnicity, COUNT(*) AS Count
+FROM stopsearch
+WHERE Person_defined_ethnicity IS NOT NULL AND Person_defined_ethnicity != '' AND Officer_ethnicity IS NOT NULL AND Officer_ethnicity != ''
+GROUP BY Person_defined_ethnicity, Officer_ethnicity")
+
+# Create a table with grouped ethnicity of drivers
+broad_officer_enthnicity <- officer_enthnicity %>%
+  mutate(Ethnic_Groups = case_when(
+    grepl("Asian/Asian British", Ethnicity) ~ "Asians",
+    grepl("Black/African/Caribbean/Black British", Ethnicity) ~ "Blacks",
+    grepl("Mixed/Multiple ethnic groups", Ethnicity) ~ "Mixed Ethnic Groups",
+    grepl("White", Ethnicity) ~ "White",
+    grepl("Other ethnic group", Ethnicity) ~ "Other Ethnic Groups")) %>%
+  group_by(Ethnic_Groups, Officer_Ethnicity) %>%
+  summarise(Grp_Counts = sum(Count)) %>%
+  group_by(Ethnic_Groups) %>%
+  mutate(Grp_Proportion = 100*(Grp_Counts / sum(Grp_Counts)))
+
+# Visualization
+# Plot the percentage of officer ethnicity stopping each ethnic group drivers
+plot_officer_ethnicty <- ggplot(broad_officer_enthnicity, aes(x = Ethnic_Groups, y = Grp_Proportion, fill = Officer_Ethnicity)) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(title = "Ethnicity distribution of stop and search by Driver & Officer's Ethnicity",
+       fill = "Officer Ethnicity",
+       subtitle = "Percentage of ethnic identification of officers stopping drivers of each ethnic group",
+       caption = "Data Source: data.police.uk/data\nNote: The data includes outcomes of stop and search records from Nov'20 to Oct'23") +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    plot.margin = margin(0, 0, 0, 0, "cm"),
+    plot.title = element_text(margin = margin(0, 0, 7, 0), face = "bold"),
+    plot.subtitle = element_text(margin = margin(5, 0, 8, 0)),
+    plot.caption = element_text(margin = margin(15, 0, 0, 0), color = "slategrey"),
+    legend.position = "bottom"
+  ) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  scale_fill_brewer(palette = "Set2")
+
+# Print the visualization
+plot_officer_ethnicty
+
+```
+<center> **Graph 4: Ethnicity distribution of stop and search by Driver & Officer's Ethnicity** </center>
+
+<br>
+**Analysis:** Contrary to expectations, the data suggests people are more likely to be stopped and searched by an officer of the same ethnic identity, possibly indicating a bias where officers may assume more authority over individuals with a similar ethnic background. Alternatively, it could be a deliberate strategy by police forces to mitigate potential accusations of ethnic bias in sensitive stop and search cases
+
+### Strip search by Ethnicity 
+Next, we investigate potential bias by looking at the percentage times the stop-search has escalated into a strip search (i.e., been asked to remove more than outer layer of clothing) for each ethnic group, broken down by years. The graph below illustrates the findings:
+
+```{r, stripsearch, echo=FALSE}
+
+# Create a table counting the percentage times person 
+# was strip searched or not after stops, by Ethnicity
+clothing_removal_enthnicity <- dbGetQuery(db, "
+SELECT Person_defined_ethnicity AS Ethnicity, Removal_Outer_Clothing AS Strip_search, Year AS Year, COUNT(*) AS Counts,
+100.0 * COUNT(*) / SUM(COUNT(*)) OVER (PARTITION BY Person_defined_ethnicity, Year) AS Percentage
+FROM stopsearch
+WHERE Year in ('2021', '2022', '2023') AND Person_defined_ethnicity IS NOT NULL AND Person_defined_ethnicity != '' AND Removal_Outer_Clothing != '' AND Removal_Outer_Clothing IS NOT NULL
+GROUP BY Person_defined_ethnicity, Removal_Outer_Clothing, Year")
+
+# Create a table for the grouped ethnic groups
+strip_search_enthnicity <- clothing_removal_enthnicity %>%
+  mutate(Ethnicity = case_when(
+    grepl("Asian/Asian British", Ethnicity) ~ "Asians",
+    grepl("Black/African/Caribbean/Black British", Ethnicity) ~ "Blacks",
+    grepl("Mixed/Multiple ethnic groups", Ethnicity) ~ "Mixed Ethnic Groups",
+    grepl("White", Ethnicity) ~ "White",
+    grepl("Other ethnic group", Ethnicity) ~ "Other Ethnic Groups")) %>%
+  group_by(Ethnicity, Strip_search, Year) %>%
+  summarise(Counts = sum(Counts)) %>%
+  group_by(Ethnicity, Year) %>%
+  mutate(Percentage = 100*(Counts / sum(Counts))) %>% filter(Strip_search == 'True')
+
+# Create a table that details the percentages of strip search under each ethnic group
+# Combine the grouped and detailed ethnic tables for year 2021 and only True percentages
+clothing_removal_enthnicity_21 <- clothing_removal_enthnicity %>% filter(Year == '2021' & Strip_search == 'True')
+filtered_stripsearch_21 <- strip_search_enthnicity %>% filter(Year == '2021')
+
+# combine the grouped and detailed tables
+stripcheck_detailed_21 <- rbind(clothing_removal_enthnicity_21, filtered_stripsearch_21) %>% select(-c(Year, Strip_search))
+
+# Define a custom order for row indices
+custom_order <- c(20, 1, 2, 3, 4 , 5, 21, 6, 7, 8, 22, 9, 10, 11, 12, 23, 13, 14, 15, 24, 16, 17, 18, 19)
+
+# Reorder the dataframe based on the custom order
+stripcheck_detailed_21 <- stripcheck_detailed_21[custom_order, ]
+
+# Remove/Replace the row names with NULL values
+rownames(stripcheck_detailed_21) <- NULL
+
+plot_stripsearch_ethnicity <- ggplot(strip_search_enthnicity, aes(y = Ethnicity, x = Percentage, fill = Year)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "Strip search cases by Ethnicity",
+    subtitle = "Percentage times person was asked to remove more than the outer clothing by Ethnicity",
+    caption = "Data Source: data.police.uk/data\nNote: The data for 2023 only includes stop and search records till Oct'23"
+  ) + scale_x_continuous(labels = scales::percent_format(scale = 1)) +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    plot.title = element_text(margin = margin(0, 0, 5, 0), face = "bold"),
+    plot.subtitle = element_text(margin = margin(5, 0, 8, 0)),
+    plot.caption = element_text(margin = margin(15, 0, 0, 0), color = "slategrey"),
+    legend.position = "right"
+  ) +
+  geom_text(
+    aes(label = sprintf("%.2f", Percentage),
+        x = Percentage + 0.2),
+    color = "black",
+    size = 3,
+    position = position_dodge(width = 0.9)
+  ) + scale_fill_brewer(palette = "RdYlBu")
+
+# Print the visualization for stripsearch outcomes by Ethnicity
+plot_stripsearch_ethnicity
+
+#Print the data frame with formatting
+stripcheck_detailed_21_formatted <- stripcheck_detailed_21 %>%
+  kable("html") %>%
+  row_spec(c(1, 7, 11, 16, 20), bold = TRUE, color = "black", background = "lightgrey")
+
+```
+<center> **Graph 5: Strip search cases by Ethnicity** </center>
+
+<br>
+**Analysis:** The data reveals a potential bias against the Black individuals, as the percentage of them being asked to remove more than the outer clothing in an event of stop and search is consistently the highest across all three years, followed by individuals from the Other Ethnic Group. Also, the same measure for the White individuals was consistently the lowest across all the years, hinting at a possible bias, when it comes to escalation of police stops into a strip-search.
+
+The table below provides a detailed breakdown of the percentage times the specific ethnic identities under an ethnic group were strip searched in the year 2021, to give you a more nuanced insights:
+
+```{r}
+# Print the strip search outcomes for detailed ethnic identities
+stripcheck_detailed_21_formatted
+
+```
+<center> **Table 2: Percentage times strip search conducted for specific ethnic identities** </center>
+
+
+<br>
+The table highlights that even within the Mixed Ethnic group, the White-Blacks had a higher percentage of cases of strip search when stopped and searched by the police, which reinforces our suspicion of a potential bias against the Blacks in this respect.
+
+### No Action Taken by Ethnicity
+
+Next, we try to investigate for any potential bias in terms of leniency shown by the police towards different ethnic groups, in cases when the object of search has been found in possession with the person stopped. The below graph illustrates the percentages of no action taken in such cases across ethnic groups:
+
+```{r, noaction, echo=FALSE}
+# Extract the table with counts for cases when
+# The outcome of object search is True
+# And No Police Action has been taken
+# Across ethnicities
+no_action_ethnicty <- dbGetQuery(db, "
+SELECT Person_defined_ethnicity AS Ethnicity, Outcome AS Outcome, Outcome_object_search AS Outcome_object_search, COUNT (*) AS Count, 100.0 * COUNT(*) / SUM(COUNT(*)) OVER () AS Percentage 
+FROM stopsearch
+WHERE
+Person_defined_ethnicity IS NOT NULL AND Person_defined_ethnicity != '' AND 
+Outcome IN ('A no further action disposal') AND
+Outcome_object_search IN ('True') 
+GROUP BY Person_defined_ethnicity, Outcome, Outcome_object_search")
+
+# Combine the ethnicity into broader groups
+grouped_noaction_ethnicity <- no_action_ethnicty %>% 
+  mutate(Ethnicity = case_when(
+    grepl("Asian/Asian British", Ethnicity) ~ "Asians",
+    grepl("Black/African/Caribbean/Black British", Ethnicity) ~ "Blacks",
+    grepl("Mixed/Multiple ethnic groups", Ethnicity) ~ "Mixed Ethnic Groups",
+    grepl("White", Ethnicity) ~ "White",
+    grepl("Other ethnic group", Ethnicity) ~ "Other Ethnic Groups")) %>%
+  group_by(Ethnicity, Outcome, Outcome_object_search) %>%
+  summarise(Count = sum(Count)) %>%
+  group_by() %>%
+  mutate(Percentage = 100*(Count / sum(Count)))
+
+# Combine the detailed and grouoed tables 
+noaction_detailed_df <- rbind(no_action_ethnicty, grouped_noaction_ethnicity)
+ 
+ # Define a custom order for row indices
+custom_order <- c(20, 1, 2, 3, 4 , 5, 21, 6, 7, 8, 22, 9, 10, 11, 12, 23, 13, 14, 15, 24, 16, 17, 18, 19)
+
+# Reorder the dataframe based on the custom order
+noaction_detailed_df <- noaction_detailed_df[custom_order, ] %>% select(-c(Outcome, Outcome_object_search))
+
+# Remove/Replace the row names with NULL values
+rownames(noaction_detailed_df) <- NULL
+
+# Format the detailed table
+noaction_detailed_formatted <- noaction_detailed_df %>%
+  kable("html") %>%
+  row_spec(c(1, 7, 11, 16, 20), bold = TRUE, color = "black", background = "lightgrey") 
+
+# Visualize the no action cases by ethnicity
+plot_noaction_ethnicity <- ggplot(grouped_noaction_ethnicity, aes(x = Ethnicity, y = Percentage, fill=Ethnicity)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "No Action Taken by Ethnicty",
+    subtitle = "Percentage times object of search was found in possession but no police action taken, broken down by ethnicity",
+    caption = "Data Source: data.police.uk/data\nNote: The data includes outcomes of stop and search records from Nov'20 to Oct'23"
+  ) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    plot.title = element_text(margin = margin(0, 0, 5, 0), face = "bold"),
+    plot.subtitle = element_text(margin = margin(5, 0, 8, 0)),
+    plot.caption = element_text(margin = margin(15, 0, 0, 0), color = "slategrey"),
+    legend.position = "bottom"
+  ) +
+  scale_fill_brewer(palette = "Paired") +
+   geom_text(
+    aes(label = sprintf("%.2f", Percentage),
+        y = Percentage + 2.5),
+    color = "black",
+    size = 3,
+    position = position_dodge(width = 0.9))
+
+# Print the no action visualization
+plot_noaction_ethnicity
+
+```
+<center> **Graph 6: No Action taken by Ethnicity** </center>
+
+<br>
+**Analysis:** The graph suggests a bias towards Whites, as they make for a disproportionately high proportion of the ethnic identity that is shown such leniency out of all such cases when the object of search is found and yet no action taken is taken.Some might argue that Whites might have been found with objects of less severity or criminal significance, but the trend remained the same even when controlled for the object of search. 
+
+The below table highlights that the major contributors to the percentage values for Asians and Whites are Pakistani's and British/Welsh/Scottish respectively.
+
+```{r}
+
+noaction_detailed_formatted
+
+```
+<center> **Table 3: Probability of no action taken agaisnt specific ethnic identities** </center>
+
+<br>
+
+## Distribution of Stop & Search Cases by Age
+
+Next, we investigate possible biases with respect to age. We start by looking at the basic age distribution of all the stop and search records.
+
+```{r, age_stopsearch, echo=FALSE}
+library(scales)
+library(gridExtra)
+
+# Create a table showing the percentage of stop-searches by age range
+age_stopsearch_dist <- dbGetQuery(db, "SELECT *,
+       ROUND(Percentage, 2) AS Rounded_Percentage
+FROM (
+    SELECT Age_range,
+           COUNT(*) AS Count,
+           100.0 * COUNT(*) / SUM(COUNT(*)) OVER () AS Percentage
+    FROM stopsearch
+    WHERE Age_range IS NOT NULL AND Age_range != ''
+    GROUP BY Age_range
+) AS subquery")
+
+# Visualize the age distribution
+pie_age_stopsearch <- ggplot(age_stopsearch_dist, aes(x = "", y = Rounded_Percentage, fill = Age_range))+
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar(theta = "y") +
+  labs(
+    title = "Distribution of stop and search by Age",
+    subtitle = "Percentage distribution of stop and search by age groups",
+    caption = "Data Source: data.police.uk/data\nNote: The data includes outcomes of stop and search records from Nov'20 to Oct'23",
+  ) +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.border = element_blank(),
+    panel.grid = element_blank(),
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    plot.title = element_text(size = 14, margin = margin(0, 0, 5, 0), face = "bold"),
+    plot.subtitle = element_text(margin = margin(5, 0, 8, 0)),
+    plot.caption = element_text(margin = margin(15, 0, 0, 0), color = "slategrey")) +
+  scale_fill_brewer(palette = "YlGnBu") +
+  geom_text(aes(label = paste0(round(Rounded_Percentage, 2), "%")),
+            position = position_stack(vjust = 0.5),
+            size = 3.5)
+
+# Extract the table with percentage counts of outcomes by Age
+# Where object of search is controlled drugs
+# And the object is found in possession
+age_outcome_dist <- dbGetQuery(db, "
+SELECT Age_range AS Age, Outcome AS Outcome, COUNT(*) AS Count, 100.0 * COUNT(*) / SUM(COUNT(*)) OVER (PARTITION BY Age_range) AS Percentage
+FROM stopsearch
+WHERE Object_of_search IN ('Controlled drugs') AND 
+Outcome_object_search = 'True' AND
+Age_range IS NOT NULL AND Age_range != '' AND Outcome != '' AND Outcome IS NOT NULL
+GROUP BY Age_range, Outcome")
+
+# Combine data into broader into ethnic groups
+grouped_outcome_by_age <- age_outcome_dist %>% 
+  mutate(Outcome = case_when(
+    grepl("A no further action disposal", Outcome) ~ "No further action",
+    grepl("Arrest", Outcome) ~ "Arrest",
+    !grepl("A no further action disposal|Arrest", Outcome) ~ "Minor action taken")) %>%
+  group_by(Age, Outcome) %>%
+  summarise(Counts = sum(Count)) %>%
+  group_by(Age) %>%
+  mutate(Percentage = 100*(Counts / sum(Counts)))
+
+# visualize the outcomes by age
+plot_outcome_by_age <- ggplot(grouped_outcome_by_age, aes(x = Age, y = Percentage, fill = Outcome)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "Stop Search Outcomes for Controlled Drugs by Age",
+    subtitle = "Percentage of stop and search outcomes when looking for controlled drugs by Age",
+    caption = "Data Source: data.police.uk/data\nNote: The data includes outcomes of stop and search records from Nov'20 to Oct'23", 
+    fill = "Outcome"
+  ) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    plot.title = element_text(margin = margin(0, 0, 5, 0), face = "bold"),
+    plot.subtitle = element_text(margin = margin(5, 0, 8, 0)),
+    plot.caption = element_text(margin = margin(15, 0, 0, 0), color = "slategrey"),
+    legend.position = "bottom"
+  ) +
+   scale_fill_brewer(palette = "YlGnBu") +
+   geom_text(
+    aes(label = sprintf("%.2f", Percentage),
+        y = Percentage + 2.5),
+    color = "black",
+    size = 3,
+    position = position_dodge(width = 0.9)) + coord_flip()
+
+#extract table counting the percentage times
+# controlled drugs are found, by Age groups
+age_controldrugs_search <- dbGetQuery(db, "
+SELECT Age_range AS Age, Outcome_object_search, COUNT(*) AS Count, 100.0 * COUNT(*) / SUM(COUNT(*)) OVER (PARTITION BY Age_range) AS Percentage
+FROM stopsearch
+WHERE object_of_search IN ('Controlled drugs') AND Age_range IS NOT NULL AND Age_range != '' AND Outcome_object_search IS NOT NULL AND Outcome_object_search != ''
+GROUP BY Age_range, Outcome_object_search")
+
+age_controldrugs_search <- age_controldrugs_search %>% filter(Outcome_object_search == 'True')
+
+# visualize the outcomes of object search by age
+plot_age_controldrugs_search <- ggplot(age_controldrugs_search, aes(x = Age, y = Percentage)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(
+    title = "Object Search Outcomes for Controlled Drugs by Age",
+    subtitle = "Percentage of times controlled drugs found in possession by Age",
+    caption = "Data Source: data.police.uk/data\nNote: The data includes outcomes of stop and search records from Nov'20 to Oct'23"
+  ) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    plot.title = element_text(margin = margin(0, 0, 5, 0), face = "bold"),
+    plot.subtitle = element_text(margin = margin(5, 0, 8, 0)),
+    plot.caption = element_text(margin = margin(15, 0, 0, 0), color = "slategrey"),
+    legend.position = "bottom"
+  ) +
+  scale_fill_brewer(palette = "Blues") +
+   geom_text(
+    aes(label = sprintf("%.2f", Percentage),
+        y = Percentage + 2.5),
+    color = "black",
+    size = 3,
+    position = position_dodge(width = 0.9))
+
+# Print the plots
+pie_age_stopsearch
+```
+<center> **Graph 7: Age distribution of Stop and Search incidences** </center>
+
+<br>
+The analysis reveals that the age group of 18-24 accounts for the highest proportion (32%) of stop-search cases, while those between 18-34 collectively contribute over half (56%). This aligns with the stereotype that younger individuals are perceived to be more involved in illegal activities. 
+
+However, a nuanced observation emerges regarding controlled drug searches. Despite individuals aged 18-34 being more likely to possess controlled drugs during stop-search events, those above 34 are more prone to arrest for the same, while individuals in the 18-24 age group typically receive minor actions, challenging conventional beliefs.
+
+
+```{r, fig.width = 14}
+# Print a horizontal stack of two graphs
+grid.arrange(plot_outcome_by_age, plot_age_controldrugs_search, ncol = 2)
+
+```
+<center> **Graph 8: Outcomes for controlled drug searches by Age** </center>
+
+<br>
+To look for potential bias based on gender, we start with observing the gender distribution of all the stop-search events taken place between Nov’20 to Oct’23, which shows a disproportionately high representation of males in the stop-search events (85%), considering the UK has a very comparable and similar percentage distribution of males and females in the overall population.
+
+*“According to the 2021 Census UK, women and girls made up 30.4 million (51.0%) of the population of England and Wales, and men and boys made up 29.2 million (49.0%)”*
+
+This suggests a bias against male drivers perhaps. But this might partially be attributed to the possibility that registered male drivers in the UK maybe marginally more than the females. Although, as of 2019 there was only a difference of 9% between male and female registered driving licences. [Refer](https://www.statista.com/statistics/314886/percentage-of-adults-holding-driving-licences-england/)
+
+<br>
+```{r, gender, echo=FALSE}
+# Extract table showing the gender dist. of all stop-search cases
+gender_dist <- dbGetQuery(db, "SELECT
+  Gender AS Gender,
+  COUNT(*) AS Count,
+  100.0 * COUNT(*) / SUM(COUNT(*)) OVER () AS Percentage
+FROM
+  stopsearch
+GROUP BY
+  Gender")
+
+# filter out the NA and blank gender records
+filtered_gender_dist <- gender_dist %>% filter(!(Gender == "" | is.null(Gender)))
+filtered_gender_dist$Percentage <- round(filtered_gender_dist$Percentage, 2)
+
+# visualize the gender distribution
+pie_gender_stopsearch <- ggplot(filtered_gender_dist, aes(x = "", y = Percentage, fill = Gender))+
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar(theta = "y") +
+  labs(
+    title = "Distribution of stop and search by Gender",
+    subtitle = "Percentage distribution of stop and search by gender",
+    caption = "Data Source: data.police.uk/data\nNote: The data includes outcomes of stop and search records from Nov'20 to Oct'23",
+  )  +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    panel.border = element_blank(),
+    panel.grid = element_blank(),
+    axis.ticks = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    plot.title = element_text(size = 14, margin = margin(0, 0, 5, 0), face = "bold"),
+    plot.subtitle = element_text(margin = margin(5, 0, 8, 0)),
+    plot.caption = element_text(margin = margin(15, 0, 0, 0), color = "slategrey")) +
+  scale_fill_brewer(palette = "Accent") +
+  geom_text(aes(label = paste0(Percentage, "%")),
+            position = position_stack(vjust = 0.28),
+            size = 3.5)
+
+# extract table for the percentage outcomes of stop and search by gender 
+gender_outcome_dist <- dbGetQuery(db, "SELECT
+    Gender AS Gender, Outcome AS Outcome,
+    COUNT(*) AS Count,
+    100 * COUNT(*) / SUM(COUNT(*)) OVER (PARTITION BY Gender) AS Percentage
+FROM
+    stopsearch
+WHERE
+    Outcome IS NOT NULL AND
+    Outcome != '' AND
+    Gender IS NOT NULL AND
+    Gender != ''
+GROUP BY
+    Gender, Outcome, Outcome_object_search")
+
+# combine the data into broader ethnic groups
+grouped_gender_outcome <- gender_outcome_dist %>% mutate(Outcome = case_when(
+    grepl("A no further action disposal", Outcome) ~ "No further action",
+    grepl("Arrest", Outcome) ~ "Arrest",
+    !grepl("A no further action disposal|Arrest", Outcome) ~ "Minor action taken")) %>%
+  group_by(Gender, Outcome) %>%
+  summarise(Counts = sum(Count)) %>%
+  group_by(Gender) %>%
+  mutate(Percentage = 100*(Counts / sum(Counts)))
+
+#visualize the outcomes by gender
+plot_gender_outcome <- ggplot(grouped_gender_outcome, aes(x = Gender, y = Percentage, fill = Outcome)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "Stop Search Outcomes for by Gender",
+    subtitle = "Percentage of stop and search outcomes by Gender",
+    caption = "Data Source: data.police.uk/data\nNote: The data includes outcomes of stop and search records from Nov'20 to Oct'23", 
+  ) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    plot.title = element_text(margin = margin(0, 0, 5, 0), face = "bold"),
+    plot.subtitle = element_text(margin = margin(5, 0, 8, 0)),
+    plot.caption = element_text(margin = margin(15, 0, 0, 0), color = "slategrey"),
+    legend.position = "bottom"
+  ) +
+   scale_fill_brewer(palette = "Accent") +
+   geom_text(
+    aes(label = sprintf("%.2f", Percentage),
+        y = Percentage + 2.5),
+    color = "black",
+    size = 3,
+    position = position_dodge(width = 0.9)) + coord_flip()
+
+#Extract table highlighting percentage of no action taken by gender
+no_action_gender <- dbGetQuery(db, "
+SELECT Gender, Outcome AS Outcome, Outcome_object_search AS Outcome_object_search, COUNT (*) AS Count, 100.0 * COUNT(*) / SUM(COUNT(*)) OVER () AS Percentage 
+FROM stopsearch
+WHERE
+Gender IS NOT NULL AND Gender != '' AND 
+Outcome IN ('A no further action disposal') AND
+Outcome_object_search IN ('True') 
+GROUP BY Gender, Outcome, Outcome_object_search")
+
+# visualize the no action data for gender types
+plot_gender_noaction <- ggplot(no_action_gender, aes(x = Gender, y = Percentage, fill = Gender)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "No Action Taken by Gender",
+    subtitle = "Percentage of times the object of search was found in possession\nbut no police action was taken, by Gender",
+    caption = "Data Source: data.police.uk/data\nNote: The data includes object search outcomes of stop and search records from Nov'20 to Oct'23") +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    plot.title = element_text(margin = margin(0, 0, 5, 0), face = "bold"),
+    plot.subtitle = element_text(margin = margin(5, 0, 8, 0)),
+    plot.caption = element_text(margin = margin(15, 0, 0, 0), color = "slategrey"),
+    legend.position = "bottom"
+  ) + scale_fill_brewer(palette = "RdPu") +
+   geom_text(
+    aes(label = sprintf("%.2f", Percentage),
+        y = Percentage + 2.5),
+    color = "black",
+    size = 3,
+    position = position_dodge(width = 0.9))
+
+# Extract table for the percentage of object search outcomes by gender
+gender_object_search <- dbGetQuery(db, "
+SELECT Gender, Outcome_object_search AS Outcome_of_search, COUNT(*) AS Count, 100.0 * COUNT(*) / SUM(COUNT(*)) OVER (PARTITION BY Gender) AS Percentage
+FROM stopsearch
+WHERE 
+Gender IS NOT NULL AND Gender != '' AND Outcome_object_search IS NOT NULL AND Outcome_object_search != ''
+GROUP BY Gender, Outcome_object_search")
+
+# visualize or plot the percentage of object search outcomes by gender
+plot_gender_object_search <- ggplot(gender_object_search, aes(x = Gender, y = Percentage, fill = Outcome_of_search)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "Outcomes of object search by Gender",
+    subtitle = "Percentage of outcomes of object search by Gender",
+    caption = "Data Source: data.police.uk/data\nNote: The data includes object search outcomes of stop and search records from Nov'20 to Oct'23") +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    plot.title = element_text(margin = margin(0, 0, 5, 0), face = "bold"),
+    plot.subtitle = element_text(margin = margin(5, 0, 8, 0)),
+    plot.caption = element_text(margin = margin(15, 0, 0, 0), color = "slategrey"),
+    legend.position = "bottom"
+  ) + scale_fill_brewer(palette = "Pastel1") +
+   geom_text(
+    aes(label = sprintf("%.2f", Percentage),
+        y = Percentage + 2.5),
+    color = "black",
+    size = 3,
+    position = position_dodge(width = 0.9))
+
+# Print the gender distribution pie
+pie_gender_stopsearch
+
+```
+<center> **Graph 9: Gender distribution of stop-search incidences** </center>
+
+
+<br>
+```{r, echo=FALSE, fig.height=9, fig.width = 12}
+
+# Print a horizontal stack of two graphs
+grid.arrange(
+  plot_gender_outcome,
+  arrangeGrob(
+    plot_gender_object_search,
+    plot_gender_noaction,
+    ncol = 2
+  ),
+  nrow = 2
+)
+
+```
+<center> **Graph 10: Outcome scenarios by Gender** </center>
+
+<br>
+Examining gender-based biases in stop-search events reveals distinct patterns. Women are often left with no further actions, while the Other gender type faces the highest arrest rate (16.4%). Despite being less likely to have a positive object search outcome (28%), Other gender types experience a higher arrest percentage, suggesting potential bias against non-binary individuals. Additionally, Other gender types constitute a negligible proportion in police leniency cases where the object is found but no action is taken, contrasting with males who dominate such scenarios at 87%. These observations underscore the presence of gender-based disparities and warrant further scrutiny.
+
+**Limitation:** 
+
+- The records of stop and search for Other gender type, is a very small proportion of the overall records (0.28%), and therefore there is a higher risk of over/under representation in the relative context of the analysis.
+
+## Spatial Analysis
+
+An interactive map, utilizing stop-search data from Aug'23 to Oct'23, sheds light on the spatial distribution of stop-search incidents in the UK. Represented by dots on police jurisdiction boundaries, the map unveils distinct patterns. Asian, Black, and Mixed Ethnic group incidents cluster around major cities, particularly London/GLA, possibly linked to higher migrant settlements and crime rates in populous cities. Conversely, Other Ethnic Groups and Whites display a more scattered distribution. This spatial analysis provides insights into the geographical variations of stop-search occurrences, reflecting demographic and urban dynamics influencing policing patterns.
+
+**Note:**You can hover and click on each of the dots or police force boundaries (scaled by percentage of the total stop-search incidences) for additional details.
+
+
+```{r, maps, echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+library(sf)
+library(tmap)
+
+# extract counts of stop-search records across police forces for year 2023
+map_stopsearch_df <- dbGetQuery(db, "
+SELECT Police_Force AS Police_Force, COUNT(*) AS Count,
+100.0 * COUNT(*) / SUM(COUNT(*)) OVER () AS Percentage
+FROM stopsearch
+WHERE Year = '2023'
+GROUP BY Police_Force")
+
+# Clean the Police Force names/values
+map_stopsearch_df$Police_Force <- str_replace_all(map_stopsearch_df$Police_Force, "-", " ")
+length(map_stopsearch_df$Police_Force)
+
+# Read the police force shp files
+police_force_shp <- st_read("data/police_force_areas/police_force_areas.shp")
+
+merged_stopsearch_policeforce <- police_force_shp %>% left_join(map_stopsearch_df, by = join_by( pfa_name == Police_Force))
+
+# Extract data for stop search records from Aug-Oct'23
+map_stopsearch_23 <- dbGetQuery(db, "
+SELECT Person_defined_ethnicity AS Ethnicity, Age_range, Gender,
+Latitude, Longitude
+FROM stopsearch
+WHERE 
+Latitude IS NOT NULL AND Latitude != '' AND
+Longitude IS NOT NULL AND Longitude != '' AND
+Person_defined_ethnicity IS NOT NULL AND 
+Person_defined_ethnicity != '' AND
+Gender IS NOT NULL AND
+Gender != '' AND
+Age_range IS NOT NULL AND
+Age_range != '' AND
+SUBSTR(Date, 1, 7) IN ('2023-10', '2023-09', '2023-08')
+")
+# Create ethnic groupings
+grped_map_stopsearch_23 <- map_stopsearch_23 %>%
+  mutate(Ethnic_Groups = case_when(
+    grepl("Asian/Asian British", Ethnicity) ~ "Asians",
+    grepl("Black/African/Caribbean/Black British", Ethnicity) ~ "Blacks",
+    grepl("Mixed/Multiple ethnic groups", Ethnicity) ~ "Mixed Ethnic Groups",
+    grepl("White", Ethnicity) ~ "White",
+    grepl("Other ethnic group", Ethnicity) ~ "Other Ethnic Groups"))
+
+# create geometry points with Lat and Long columns
+map_stop23_sfdata <- st_as_sf(grped_map_stopsearch_23, coords = c("Longitude", "Latitude"), crs = 4326)
+
+# Plot the interactive map wiht police boundaries and stop search records as dots
+interactive_stopsearch_ethnic <- tmap_mode("view") + tm_shape(merged_stopsearch_policeforce) +
+  tm_polygons(col = "Percentage", palette = "Pastel1", alpha = 0.7) +
+  # Superimpose the the stop search events
+  tm_shape(map_stop23_sfdata) +
+  tm_dots(col = "Ethnic_Groups", palette = "viridis", size = 0.01)
+
+# Plot the maps faceted by ethnic groups 
+Faceted_ethnic_map <- tmap_mode("plot") + tm_shape(merged_stopsearch_policeforce) +
+  tm_polygons(col = "grey85", alpha = 0.3) +
+  # Superimpose the the stop search events
+  tm_shape(map_stop23_sfdata) +
+  tm_dots(col = "Ethnic_Groups", palette = "viridis", size = 0.02) +
+  #facet by ethnic groups
+  tm_facets(by = c("Ethnic_Groups"))
+
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+#print the interactive map
+tmap_mode("view")
+interactive_stopsearch_ethnic
+
+```
+<center> **Map 1: Spatial distribution of stop-search incidences by Ethnicity and Police Forces** </center>
+
+<br>
+**Faceted map plots by Ethnicity:**
+
+```{r, faceted_map, echo=FALSE}
+
+#print the faceted map
+tmap_mode("plot")
+Faceted_ethnic_map
+```
+<center> **Map 2: Faceted spatial distribution of stop-search incidences by Ethnicity** </center>
+
+
+<br>
+
+## Limitations of the analysis:
+
+- For all the faceted analysis, the missing values for the involved factors were removed.
+
+- The analysis could face criticism for oversimplification by excluding missing/NA values from the multi-faceted analysis, potentially skewing comparisons. For example if we re-analyse the outcomes of object search by ethnic groups with the missing/NA values included as 'Not Recorded', it would look like this:
+
+```{r, limitation}
+
+ethnicity_object_search_limitation <- dbGetQuery(db, "
+SELECT Person_defined_ethnicity AS Ethnicity, Outcome_object_search AS Outcome_of_search, COUNT(*) AS Count, 100.0 * COUNT(*) / SUM(COUNT(*)) OVER (PARTITION BY Person_defined_ethnicity) AS Proportion
+FROM stopsearch
+WHERE 
+Person_defined_ethnicity IS NOT NULL AND Person_defined_ethnicity != ''
+GROUP BY Person_defined_ethnicity, Outcome_object_search")
+
+# Group the data by ethnic groups
+broad_ethnicity_object_search_limitation <- ethnicity_object_search_limitation %>%
+   mutate(Ethnicity = case_when(
+    grepl("Asian/Asian British", Ethnicity) ~ "Asians",
+    grepl("Black/African/Caribbean/Black British", Ethnicity) ~ "Blacks",
+    grepl("Mixed/Multiple ethnic groups", Ethnicity) ~ "Mixed Ethnic Groups",
+    grepl("White", Ethnicity) ~ "White",
+    grepl("Other ethnic group", Ethnicity) ~ "Other Ethnic Groups")) %>%
+  mutate(Outcome_of_search = case_when(
+   !grepl("True|False", Outcome_of_search) ~ "Not recorded",
+   grepl("True", Outcome_of_search) ~ "True",
+   grepl("False", Outcome_of_search) ~ "False"
+  )) %>%
+  group_by(Ethnicity, Outcome_of_search) %>%
+  summarise(Counts = sum(Count)) %>%
+  group_by(Ethnicity) %>%
+  mutate(Percentage = 100*(Counts/ sum(Counts))) #%>% filter(Outcome_of_search == 'False')
+
+
+plot_object_search_ethnicity_limitation <- ggplot(broad_ethnicity_object_search_limitation, aes(x = Ethnicity, y = Percentage, fill = Outcome_of_search)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "Object search outcome by Ethnicity",
+    subtitle = "Percentage outcome of object search within each Ethnic group.", 
+    caption = "Data Sources: National Office of Satistics, Census'21, data.police.uk/data\nNote: The data includes stop and search records from Nov'20 to Oct'23") +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  theme(axis.text.x = element_text(), axis.title.x = element_blank(),
+        axis.title.y = element_blank(), plot.margin = margin(0, 0, 0, 0, "cm"),
+        plot.title = element_text(margin = margin(0, 0, 5, 0), face = "bold"),
+    plot.subtitle = element_text(margin = margin(5, 0, 8, 0)),
+    plot.caption = element_text(margin = margin(15, 0, 0, 0), color = "slategrey")) +
+  geom_text(
+    aes(label = sprintf("%.2f", Percentage),
+        y = Percentage + 5),
+    color = "black",
+    size = 3,
+    position = position_dodge(width = 0.9)) +
+    scale_fill_brewer(palette = "YlGnBu") + coord_flip()
+
+plot_object_search_ethnicity_limitation
+
+# close db connection
+dbDisconnect(db)
+
+```
+<center> **Graph 11: Outcomes of object search by Ethnicity - Including 'Not Recorded' instances** </center>
+
+<br>
+This reveals uneven representation across ethnic groups. Whites are overrepresented, as more data points are considered, while Blacks are significantly underrepresented due to 85% missing outcome values, and no conclusive comparison is possible unless the non-recorded values are made known.
+
+So effectively, the base ethnic denominator for such multi-faceted analysis by Ethnicity, may not be the same as their actual distribution across all records. But that's a limitation induced by inefficient data gathering and recording practices by the police officers.
+
+## Conclusions: 
+- Compared to all other ethnic groups, individuals from 'Other Ethnic' group, which includes Arabs and some non-specified ethnic identities, are much more likely to be stopped and searched, relative to their population in the UK, with 86 people
+
+- Examining the stop and search records for probability of it escalating into a strip-search revealed a potential bias against the Blacks, where a considerably higher percentage of their stops involved a strip-search, compared to the other ethnic groups. 
+
+- On examining the outcomes of stop-search by Ethnicity and Age, it was observed that police actions are more lenient or favoured towards Whites and young adults in the age group of 18-24, as they faced less arrests or actions in cases where they were found in possession of object of search. 
+
+- Similarly, on examining the outcomes of stop-search by Gender, it was revealed that females are least likely to face severe consequences/outcomes in case, even though the are equally likely to be found in possessions of an object of search as Males. On the other hand, the outcomes seem to be adversely biased against individuals identifying as non-binary/trans perhaps, since they witness a higher percentage of arrests, even when their probability of being found in possession of a object of interest is the least.
+
+- Majority of the stop and search incidences are clustered in and around the Greater London Area, and other major metropolitan cities, such as Birmingham, Liverpool, Leeds, Manchester etc. And it is only around these cities where non-white individuals face police stoppings. This could perhaps be the case, because of a higher migrant and non-white population in major cities.
+
+## Appendix: All code in this assignment
+
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE} 
+# this chunk generates the complete code appendix. 
+# eval=FALSE tells R not to run (``evaluate'') the code here (it was already run before).
+
+```
+
+
+
+
