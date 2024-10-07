@@ -1,4 +1,4 @@
-## Research Project 1: Unveiling Cross-sectoral Dynamics and Trends: Analysing the Indian Startup ecosystem through Structural Topic Modelling
+## Research Project 2: Uncovering bias in UK Police’s Stop & Search checks
 
 The research aims to examine any unfair biases in the exercise of legislative powers granted by the 'Section 163 of the Road Traffic Act 1988' and 'Section 1 of PACE 1984' to the UK police, specifically focusing on potential biases against ethnic races, any communities, or individuals.
 
